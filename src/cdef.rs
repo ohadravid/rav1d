@@ -21,6 +21,7 @@ use libc::ptrdiff_t;
 use std::cmp;
 use std::ffi::c_int;
 use std::ffi::c_uint;
+use std::mem;
 use std::ptr;
 
 #[cfg(all(
@@ -55,9 +56,6 @@ wrap_fn_ptr!(pub unsafe extern "C" fn cdef(
     damping: c_int,
     edges: CdefEdgeFlags,
     bitdepth_max: c_int,
-    _dst: *const FFISafe<Rav1dPictureDataComponentOffset>,
-    _top: *const FFISafe<CdefTop>,
-    _bottom: *const FFISafe<CdefBottom>,
 ) -> ());
 
 pub type CdefTop<'a> = WithOffset<&'a DisjointMut<AlignedVec64<u8>>>;
@@ -87,12 +85,11 @@ impl cdef::Fn {
         let left = ptr::from_ref(left).cast();
         let top_ptr = top.as_ptr::<BD>().cast();
         let bottom_ptr = bottom.wrapping_as_ptr::<BD>().cast();
-        let top = FFISafe::new(&top);
-        let bottom = FFISafe::new(&bottom);
+
         let sec_strength = sec_strength as c_int;
         let damping = damping as c_int;
         let bd = bd.into_c();
-        let dst = FFISafe::new(&dst);
+
         // SAFETY: Rust fallback is safe, asm is assumed to do the same.
         unsafe {
             self.get()(
@@ -107,9 +104,6 @@ impl cdef::Fn {
                 damping,
                 edges,
                 bd,
-                dst,
-                top,
-                bottom,
             )
         }
     }
@@ -139,11 +133,62 @@ impl cdef_dir::Fn {
     }
 }
 
+// An erased version.
+pub struct CdefFn(
+    fn(
+        Rav1dPictureDataComponentOffset,
+        &[LeftPixelRow2px<DynPixel>; 8],
+        CdefTop,
+        CdefBottom,
+        c_int,
+        c_int,
+        c_int,
+        c_int,
+        CdefEdgeFlags,
+        c_int,
+    ),
+);
+
+impl CdefFn {
+    pub const fn new_rust<BD: BitDepth, const W: usize, const H: usize>() -> Self {
+        Self(cdef_filter_block_erased_rust::<BD, W, H>)
+    }
+
+    // What the cdef_apply code wants to call.
+    pub fn call<BD: BitDepth>(
+        &self,
+        dst: Rav1dPictureDataComponentOffset,
+        left: &[LeftPixelRow2px<BD::Pixel>; 8],
+        top: CdefTop,
+        bottom: CdefBottom,
+        pri_strength: c_int,
+        sec_strength: u8,
+        dir: c_int,
+        damping: u8,
+        edges: CdefEdgeFlags,
+        bd: BD,
+    ) {
+        let left = unsafe { mem::transmute(&left) };
+        self.0(
+            dst,
+            left,
+            top,
+            bottom,
+            pri_strength,
+            sec_strength as _,
+            dir,
+            damping as _,
+            edges,
+            bd.into_c(),
+        )
+    }
+}
+
 pub struct Rav1dCdefDSPContext {
     pub dir: cdef_dir::Fn,
 
     /// 444/luma, 422, 420
-    pub fb: [cdef::Fn; 3],
+    pub fb: [CdefFn; 3],
 }
 
 #[inline]
@@ -369,35 +414,21 @@ fn cdef_filter_block_rust<BD: BitDepth>(
     };
 }
 
-/// # Safety
-///
-/// Must be called by [`cdef::Fn::call`].
-#[deny(unsafe_op_in_unsafe_fn)]
-unsafe extern "C" fn cdef_filter_block_c_erased<BD: BitDepth, const W: usize, const H: usize>(
-    _dst_ptr: *mut DynPixel,
-    _stride: ptrdiff_t,
-    left: *const [LeftPixelRow2px<DynPixel>; 8],
-    _top_ptr: *const DynPixel,
-    _bottom_ptr: *const DynPixel,
+fn cdef_filter_block_erased_rust<BD: BitDepth, const W: usize, const H: usize>(
+    dst: Rav1dPictureDataComponentOffset,
+    left: &[LeftPixelRow2px<DynPixel>; 8],
+    top: CdefTop,
+    bottom: CdefBottom,
     pri_strength: c_int,
     sec_strength: c_int,
     dir: c_int,
     damping: c_int,
     edges: CdefEdgeFlags,
     bitdepth_max: c_int,
-    dst: *const FFISafe<Rav1dPictureDataComponentOffset>,
-    top: *const FFISafe<CdefTop>,
-    bottom: *const FFISafe<CdefBottom>,
 ) {
-    // SAFETY: Was passed as `FFISafe::new(_)` in `cdef_dir::Fn::call`.
-    let dst = *unsafe { FFISafe::get(dst) };
-    // SAFETY: Reverse of cast in `cdef::Fn::call`.
-    let left = unsafe { &*left.cast() };
-    // SAFETY: Was passed as `FFISafe::new(_)` in `cdef::Fn::call`.
-    let top = *unsafe { FFISafe::get(top) };
-    // SAFETY: Was passed as `FFISafe::new(_)` in `cdef::Fn::call`.
-    let bottom = *unsafe { FFISafe::get(bottom) };
     let bd = BD::from_c(bitdepth_max);
+    let left = unsafe { mem::transmute(&left) };
+
     cdef_filter_block_rust(
         dst,
         left,
@@ -614,35 +645,31 @@ mod neon {
         }
     }
 
-    #[deny(unsafe_op_in_unsafe_fn)]
-    pub unsafe extern "C" fn cdef_filter_neon_erased<
+    pub fn cdef_filter_neon_erased<
         BD: BitDepth,
         const W: usize,
         const H: usize,
         const TMP_STRIDE: usize,
         const TMP_LEN: usize,
     >(
-        dst: *mut DynPixel,
-        stride: ptrdiff_t,
-        left: *const [LeftPixelRow2px<DynPixel>; 8],
-        top: *const DynPixel,
-        bottom: *const DynPixel,
+        mut dst: Rav1dPictureDataComponentOffset,
+        left: &[LeftPixelRow2px<DynPixel>; 8],
+        top: CdefTop,
+        bottom: CdefBottom,
         pri_strength: c_int,
         sec_strength: c_int,
         dir: c_int,
         damping: c_int,
         edges: CdefEdgeFlags,
         bitdepth_max: c_int,
-        _dst: *const FFISafe<Rav1dPictureDataComponentOffset>,
-        _top: *const FFISafe<CdefTop>,
-        _bottom: *const FFISafe<CdefBottom>,
     ) {
         use crate::src::align::Align16;
 
-        let dst = dst.cast();
-        let left = left.cast();
-        let top = top.cast();
-        let bottom = bottom.cast();
+        let stride = dst.stride();
+        let dst = ptr::from_mut(&mut dst).cast();
+        let left = ptr::from_ref(left).cast();
+        let top = ptr::from_ref(&top).cast();
+        let bottom = ptr::from_ref(&bottom).cast();
         let bd = BD::from_c(bitdepth_max);
 
         // Use `MaybeUninit` here to avoid over-initialization.
@@ -665,6 +692,18 @@ mod neon {
             bd,
         );
     }
+
+    impl CdefFn {
+        pub const fn new_neon<
+            BD: BitDepth,
+            const W: usize,
+            const H: usize,
+            const TMP_STRIDE: usize,
+            const TMP_LEN: usize,
+        >() -> Self {
+            Self(cdef_filter_neon_erased::<BD, W, H, TMP_STRIDE, TMP_LEN>)
+        }
+    }
 }
 
 impl Rav1dCdefDSPContext {
@@ -672,9 +711,9 @@ impl Rav1dCdefDSPContext {
         Self {
             dir: cdef_dir::Fn::new(cdef_find_dir_c_erased::<BD>),
             fb: [
-                cdef::Fn::new(cdef_filter_block_c_erased::<BD, 8, 8>),
-                cdef::Fn::new(cdef_filter_block_c_erased::<BD, 4, 8>),
-                cdef::Fn::new(cdef_filter_block_c_erased::<BD, 4, 4>),
+                CdefFn::new_rust::<BD, 8, 8>(),
+                CdefFn::new_rust::<BD, 4, 8>(),
+                CdefFn::new_rust::<BD, 4, 4>(),
             ],
         }
     }
@@ -738,16 +777,14 @@ impl Rav1dCdefDSPContext {
     #[cfg(all(feature = "asm", any(target_arch = "arm", target_arch = "aarch64")))]
     #[inline(always)]
     const fn init_arm<BD: BitDepth>(mut self, flags: CpuFlags) -> Self {
-        use self::neon::cdef_filter_neon_erased;
-
         if !flags.contains(CpuFlags::NEON) {
             return self;
         }
 
         self.dir = bd_fn!(cdef_dir::decl_fn, BD, cdef_find_dir, neon);
-        self.fb[0] = cdef::Fn::new(cdef_filter_neon_erased::<BD, 8, 8, 16, { 12 * 16 + 8 }>);
-        self.fb[1] = cdef::Fn::new(cdef_filter_neon_erased::<BD, 4, 8, 8, { 12 * 8 + 8 }>);
-        self.fb[2] = cdef::Fn::new(cdef_filter_neon_erased::<BD, 4, 4, 8, { 12 * 8 + 8 }>);
+        self.fb[0] = CdefFn::new_neon::<BD, 8, 8, 16, { 12 * 16 + 8 }>();
+        self.fb[1] = CdefFn::new_neon::<BD, 4, 8, 8, { 12 * 8 + 8 }>();
+        self.fb[2] = CdefFn::new_neon::<BD, 4, 4, 8, { 12 * 8 + 8 }>();
 
         self
     }
