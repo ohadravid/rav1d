@@ -55,9 +55,6 @@ wrap_fn_ptr!(pub unsafe extern "C" fn cdef(
     damping: c_int,
     edges: CdefEdgeFlags,
     bitdepth_max: c_int,
-    _dst: *const FFISafe<Rav1dPictureDataComponentOffset>,
-    _top: *const FFISafe<CdefTop>,
-    _bottom: *const FFISafe<CdefBottom>,
 ) -> ());
 
 pub type CdefTop<'a> = WithOffset<&'a DisjointMut<AlignedVec64<u8>>>;
@@ -107,9 +104,6 @@ impl cdef::Fn {
                 damping,
                 edges,
                 bd,
-                dst,
-                top,
-                bottom,
             )
         }
     }
@@ -385,33 +379,8 @@ unsafe extern "C" fn cdef_filter_block_c_erased<BD: BitDepth, const W: usize, co
     damping: c_int,
     edges: CdefEdgeFlags,
     bitdepth_max: c_int,
-    dst: *const FFISafe<Rav1dPictureDataComponentOffset>,
-    top: *const FFISafe<CdefTop>,
-    bottom: *const FFISafe<CdefBottom>,
 ) {
-    // SAFETY: Was passed as `FFISafe::new(_)` in `cdef_dir::Fn::call`.
-    let dst = *unsafe { FFISafe::get(dst) };
-    // SAFETY: Reverse of cast in `cdef::Fn::call`.
-    let left = unsafe { &*left.cast() };
-    // SAFETY: Was passed as `FFISafe::new(_)` in `cdef::Fn::call`.
-    let top = *unsafe { FFISafe::get(top) };
-    // SAFETY: Was passed as `FFISafe::new(_)` in `cdef::Fn::call`.
-    let bottom = *unsafe { FFISafe::get(bottom) };
-    let bd = BD::from_c(bitdepth_max);
-    cdef_filter_block_rust(
-        dst,
-        left,
-        top,
-        bottom,
-        pri_strength,
-        sec_strength,
-        dir,
-        damping,
-        W,
-        H,
-        edges,
-        bd,
-    )
+    panic!()
 }
 
 /// # Safety
@@ -633,9 +602,6 @@ mod neon {
         damping: c_int,
         edges: CdefEdgeFlags,
         bitdepth_max: c_int,
-        _dst: *const FFISafe<Rav1dPictureDataComponentOffset>,
-        _top: *const FFISafe<CdefTop>,
-        _bottom: *const FFISafe<CdefBottom>,
     ) {
         use crate::src::align::Align16;
 
